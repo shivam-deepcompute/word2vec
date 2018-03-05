@@ -34,7 +34,7 @@ struct vocab_word {
   char *word, *code, codelen;
 };
 
-char train_file[MAX_STRING], output_file[MAX_STRING];
+char train_file[MAX_STRING], output_file[MAX_STRING], output_syn1_file[MAX_STRING];
 char save_vocab_file[MAX_STRING], read_vocab_file[MAX_STRING];
 struct vocab_word *vocab;
 int binary = 0, cbow = 1, debug_mode = 2, window = 5, min_count = 5, num_threads = 12, min_reduce = 1;
@@ -350,6 +350,7 @@ void ReadVocab() {
 void InitNet() {
   long long a, b;
   unsigned long long next_random = 1;
+  syn1 = syn1neg = NULL;
   a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * layer1_size * sizeof(real));
   if (syn0 == NULL) {printf("Memory allocation failed\n"); exit(1);}
   if (hs) {
@@ -460,6 +461,7 @@ void *TrainModelThread(void *id) {
           for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1[c + l2];
           // Learn weights hidden -> output
           for (c = 0; c < layer1_size; c++) syn1[c + l2] += g * neu1[c];
+
         }
         // NEGATIVE SAMPLING
         if (negative > 0) for (d = 0; d < negative + 1; d++) {
@@ -537,6 +539,7 @@ void *TrainModelThread(void *id) {
           else g = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
           for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
           for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * syn0[c + l1];
+
         }
         // Learn weights input -> hidden
         for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];
@@ -557,26 +560,35 @@ void *TrainModelThread(void *id) {
 void TrainModel() {
   long a, b, c, d;
   FILE *fo;
+  FILE *fsyn1 = NULL;
   pthread_t *pt = (pthread_t *)malloc(num_threads * sizeof(pthread_t));
   printf("Starting training using file %s\n", train_file);
   starting_alpha = alpha;
   if (read_vocab_file[0] != 0) ReadVocab(); else LearnVocabFromTrainFile();
   if (save_vocab_file[0] != 0) SaveVocab();
-  if (output_file[0] == 0) return;
+  if ((output_file[0] == 0) || (output_syn1_file[0] == 0)) return;
   InitNet();
   if (negative > 0) InitUnigramTable();
   start = clock();
   for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainModelThread, (void *)a);
   for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);
   fo = fopen(output_file, "wb");
+
+  if (output_syn1_file[0] != 0) {
+    fsyn1 = fopen(output_syn1_file, "wb");
+  }
+
   if (classes == 0) {
     // Save the word vectors
-    fprintf(fo, "%lld %lld\n", vocab_size, layer1_size);
+    real *syn1out = syn1neg != NULL ? syn1neg : syn1;
+
     for (a = 0; a < vocab_size; a++) {
-      fprintf(fo, "%s ", vocab[a].word);
       if (binary) for (b = 0; b < layer1_size; b++) fwrite(&syn0[a * layer1_size + b], sizeof(real), 1, fo);
       else for (b = 0; b < layer1_size; b++) fprintf(fo, "%lf ", syn0[a * layer1_size + b]);
-      fprintf(fo, "\n");
+
+      if (fsyn1 != NULL) {
+        for (b = 0; b < layer1_size; b++) fwrite(&syn1out[a * layer1_size + b], sizeof(real), 1, fsyn1);
+      }
     }
   } else {
     // Run K-means on the word vectors
@@ -623,6 +635,9 @@ void TrainModel() {
     free(cl);
   }
   fclose(fo);
+  if (fsyn1 != NULL) {
+    fclose(fsyn1);
+  }
 }
 
 int ArgPos(char *str, int argc, char **argv) {
@@ -647,6 +662,8 @@ int main(int argc, char **argv) {
     printf("\t\tUse text data from <file> to train the model\n");
     printf("\t-output <file>\n");
     printf("\t\tUse <file> to save the resulting word vectors / word clusters\n");
+    printf("\t-output-syn1 <file>\n");
+    printf("\t\tUse <file> to save the syn1 matrix (syn0 is the word vectors)\n");
     printf("\t-size <int>\n");
     printf("\t\tSet size of word vectors; default is 100\n");
     printf("\t-window <int>\n");
@@ -683,6 +700,7 @@ int main(int argc, char **argv) {
     return 0;
   }
   output_file[0] = 0;
+  output_syn1_file[0] = 0;
   save_vocab_file[0] = 0;
   read_vocab_file[0] = 0;
   if ((i = ArgPos((char *)"-size", argc, argv)) > 0) layer1_size = atoi(argv[i + 1]);
@@ -695,6 +713,7 @@ int main(int argc, char **argv) {
   if (cbow) alpha = 0.05;
   if ((i = ArgPos((char *)"-alpha", argc, argv)) > 0) alpha = atof(argv[i + 1]);
   if ((i = ArgPos((char *)"-output", argc, argv)) > 0) strcpy(output_file, argv[i + 1]);
+  if ((i = ArgPos((char *)"-output-syn1", argc, argv)) > 0) strcpy(output_syn1_file, argv[i + 1]);
   if ((i = ArgPos((char *)"-window", argc, argv)) > 0) window = atoi(argv[i + 1]);
   if ((i = ArgPos((char *)"-sample", argc, argv)) > 0) sample = atof(argv[i + 1]);
   if ((i = ArgPos((char *)"-hs", argc, argv)) > 0) hs = atoi(argv[i + 1]);
